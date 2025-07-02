@@ -32,6 +32,8 @@ type EditorComponent interface {
 	Paste() (tea.Model, tea.Cmd)
 	Newline() (tea.Model, tea.Cmd)
 	SetInterruptKeyInDebounce(inDebounce bool)
+	HistoryPrevious() (tea.Model, tea.Cmd)
+	HistoryNext() (tea.Model, tea.Cmd)
 }
 
 type editorComponent struct {
@@ -40,6 +42,8 @@ type editorComponent struct {
 	attachments            []app.Attachment
 	spinner                spinner.Model
 	interruptKeyInDebounce bool
+	history                []string
+	historyIndex           int
 }
 
 func (m *editorComponent) Init() tea.Cmd {
@@ -194,6 +198,16 @@ func (m *editorComponent) Submit() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	// Add to history
+	if value != "" && (len(m.history) == 0 || m.history[len(m.history)-1] != value) {
+		m.history = append(m.history, value)
+		// Keep history to a reasonable size
+		if len(m.history) > 100 {
+			m.history = m.history[1:]
+		}
+	}
+	m.historyIndex = len(m.history)
+
 	var cmds []tea.Cmd
 	updated, cmd := m.Clear()
 	m = updated.(*editorComponent)
@@ -234,6 +248,33 @@ func (m *editorComponent) Newline() (tea.Model, tea.Cmd) {
 
 func (m *editorComponent) SetInterruptKeyInDebounce(inDebounce bool) {
 	m.interruptKeyInDebounce = inDebounce
+}
+
+func (m *editorComponent) HistoryPrevious() (tea.Model, tea.Cmd) {
+	if len(m.history) == 0 {
+		return m, nil
+	}
+
+	if m.historyIndex > 0 {
+		m.historyIndex--
+		m.textarea.SetValue(m.history[m.historyIndex])
+	}
+	return m, nil
+}
+
+func (m *editorComponent) HistoryNext() (tea.Model, tea.Cmd) {
+	if len(m.history) == 0 {
+		return m, nil
+	}
+
+	if m.historyIndex < len(m.history)-1 {
+		m.historyIndex++
+		m.textarea.SetValue(m.history[m.historyIndex])
+	} else if m.historyIndex == len(m.history)-1 {
+		m.historyIndex = len(m.history)
+		m.textarea.SetValue("")
+	}
+	return m, nil
 }
 
 func (m *editorComponent) getInterruptKeyText() string {
@@ -298,5 +339,7 @@ func NewEditorComponent(app *app.App) EditorComponent {
 		textarea:               ta,
 		spinner:                s,
 		interruptKeyInDebounce: false,
+		history:                []string{},
+		historyIndex:           0,
 	}
 }

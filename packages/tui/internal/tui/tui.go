@@ -934,6 +934,14 @@ func (a appModel) executeCommand(command commands.Command) (tea.Model, tea.Cmd) 
 			cmds = append(cmds, cmd)
 		}
 	case commands.MessagesRevertCommand:
+	case commands.HistoryPreviousCommand:
+		updated, cmd := a.editor.HistoryPrevious()
+		a.editor = updated.(chat.EditorComponent)
+		cmds = append(cmds, cmd)
+	case commands.HistoryNextCommand:
+		updated, cmd := a.editor.HistoryNext()
+		a.editor = updated.(chat.EditorComponent)
+		cmds = append(cmds, cmd)
 	case commands.AppExitCommand:
 		return a, tea.Quit
 	}

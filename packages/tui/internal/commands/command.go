@@ -100,6 +100,8 @@ const (
 	MessagesLayoutToggleCommand CommandName = "messages_layout_toggle"
 	MessagesCopyCommand         CommandName = "messages_copy"
 	MessagesRevertCommand       CommandName = "messages_revert"
+	HistoryPreviousCommand      CommandName = "history_previous"
+	HistoryNextCommand          CommandName = "history_next"
 	AppExitCommand              CommandName = "app_exit"
 )
 
@@ -297,11 +299,22 @@ func LoadFromConfig(config *opencode.Config) CommandRegistry {
 			Keybindings: parseBindings("ctrl+c", "<leader>q"),
 			Trigger:     "exit",
 		},
+		{
+			Name:        HistoryPreviousCommand,
+			Description: "previous prompt",
+			Keybindings: parseBindings("up"),
+		},
+		{
+			Name:        HistoryNextCommand,
+			Description: "next prompt",
+			Keybindings: parseBindings("down"),
+		},
 	}
 	registry := make(CommandRegistry)
 	keybinds := map[string]string{}
 	marshalled, _ := json.Marshal(config.Keybinds)
 	json.Unmarshal(marshalled, &keybinds)
+
 	for _, command := range defaults {
 		if keybind, ok := keybinds[string(command.Name)]; ok && keybind != "" {
 			command.Keybindings = parseBindings(keybind)
