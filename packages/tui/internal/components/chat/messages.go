@@ -80,13 +80,9 @@ func (m *messagesComponent) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.showToolDetails = !m.showToolDetails
 		m.rendering = true
 		return m, m.Reload()
-	case app.SessionLoadedMsg:
+	case app.SessionLoadedMsg, app.SessionClearedMsg:
 		m.cache.Clear()
 		m.tail = true
-		m.rendering = true
-		return m, m.Reload()
-	case app.SessionClearedMsg:
-		m.cache.Clear()
 		m.rendering = true
 		return m, m.Reload()
 	case renderFinishedMsg:
@@ -129,6 +125,8 @@ func (m *messagesComponent) renderView(width int) {
 	m.partCount = 0
 	m.lineCount = 0
 
+	orphanedToolCalls := make([]opencode.ToolInvocationPart, 0)
+
 	for _, message := range m.app.Messages {
 		var content string
 		var cached bool
@@ -153,30 +151,39 @@ func (m *messagesComponent) renderView(width int) {
 						m.cache.Set(key, content)
 					}
 					if content != "" {
-						if m.selectedPart == m.partCount {
-							m.viewport.SetYOffset(m.lineCount - 4)
-							m.selectedText = part.Text
-						}
+						m = m.updateSelected(content, part.Text)
 						blocks = append(blocks, content)
-						m.partCount++
-						m.lineCount += lipgloss.Height(content) + 1
 					}
 				}
 			}
 
 		case opencode.MessageRoleAssistant:
-			for i, p := range message.Parts {
+			hasTextPart := false
+			for partIndex, p := range message.Parts {
 				switch part := p.AsUnion().(type) {
 				case opencode.TextPart:
+					hasTextPart = true
 					finished := message.Metadata.Time.Completed > 0
-					remainingParts := message.Parts[i+1:]
+					remainingParts := message.Parts[partIndex+1:]
 					toolCallParts := make([]opencode.ToolInvocationPart, 0)
+
+					// sometimes tool calls happen without an assistant message
+					// these should be included in this assistant message as well
+					if len(orphanedToolCalls) > 0 {
+						toolCallParts = append(toolCallParts, orphanedToolCalls...)
+						orphanedToolCalls = make([]opencode.ToolInvocationPart, 0)
+					}
+
+					remaining := true
 					for _, part := range remainingParts {
+						if !remaining {
+							break
+						}
 						switch part := part.AsUnion().(type) {
 						case opencode.TextPart:
 							// we only want tool calls associated with the current text part.
 							// if we hit another text part, we're done.
-							break
+							remaining = false
 						case opencode.ToolInvocationPart:
 							toolCallParts = append(toolCallParts, part)
 							if part.ToolInvocation.State != "result" {
@@ -216,16 +223,14 @@ func (m *messagesComponent) renderView(width int) {
 						)
 					}
 					if content != "" {
-						if m.selectedPart == m.partCount {
-							m.viewport.SetYOffset(m.lineCount - 4)
-							m.selectedText = p.Text
-						}
+						m = m.updateSelected(content, p.Text)
 						blocks = append(blocks, content)
-						m.partCount++
-						m.lineCount += lipgloss.Height(content) + 1
 					}
 				case opencode.ToolInvocationPart:
 					if !m.showToolDetails {
+						if !hasTextPart {
+							orphanedToolCalls = append(orphanedToolCalls, part)
+						}
 						continue
 					}
 
@@ -258,13 +263,8 @@ func (m *messagesComponent) renderView(width int) {
 						)
 					}
 					if content != "" {
-						if m.selectedPart == m.partCount {
-							m.viewport.SetYOffset(m.lineCount - 4)
-							m.selectedText = ""
-						}
+						m = m.updateSelected(content, "")
 						blocks = append(blocks, content)
-						m.partCount++
-						m.lineCount += lipgloss.Height(content) + 1
 					}
 				}
 			}
@@ -295,9 +295,20 @@ func (m *messagesComponent) renderView(width int) {
 	}
 
 	m.viewport.SetContent("\n" + strings.Join(blocks, "\n\n"))
-	if m.selectedPart == m.partCount-1 {
+	if m.selectedPart == m.partCount {
 		m.viewport.GotoBottom()
 	}
+
+}
+
+func (m *messagesComponent) updateSelected(content string, selectedText string) *messagesComponent {
+	if m.selectedPart == m.partCount {
+		m.viewport.SetYOffset(m.lineCount - (m.viewport.Height() / 2) + 4)
+		m.selectedText = selectedText
+	}
+	m.partCount++
+	m.lineCount += lipgloss.Height(content) + 1
+	return m
 }
 
 func (m *messagesComponent) header(width int) string {
@@ -309,9 +320,12 @@ func (m *messagesComponent) header(width int) string {
 	base := styles.NewStyle().Foreground(t.Text()).Background(t.Background()).Render
 	muted := styles.NewStyle().Foreground(t.TextMuted()).Background(t.Background()).Render
 	headerLines := []string{}
-	headerLines = append(headerLines, util.ToMarkdown("# "+m.app.Session.Title, width-6, t.Background()))
+	headerLines = append(
+		headerLines,
+		util.ToMarkdown("# "+m.app.Session.Title, width-6, t.Background()),
+	)
 	if m.app.Session.Share.URL != "" {
-		headerLines = append(headerLines, muted(m.app.Session.Share.URL))
+		headerLines = append(headerLines, muted(m.app.Session.Share.URL+"  /unshare"))
 	} else {
 		headerLines = append(headerLines, base("/share")+muted(" to create a shareable link"))
 	}
@@ -340,7 +354,7 @@ func (m *messagesComponent) View(width, height int) string {
 			height,
 			lipgloss.Center,
 			lipgloss.Center,
-			styles.NewStyle().Background(t.Background()).Render("Loading session..."),
+			styles.NewStyle().Background(t.Background()).Render(""),
 			styles.WhitespaceStyle(t.Background()),
 		)
 	}

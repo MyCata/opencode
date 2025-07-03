@@ -41,7 +41,7 @@ const (
 )
 
 const interruptDebounceTimeout = 1 * time.Second
-const fileViewerFullWidthCutoff = 200
+const fileViewerFullWidthCutoff = 160
 
 type appModel struct {
 	width, height        int
@@ -51,7 +51,7 @@ type appModel struct {
 	editor               chat.EditorComponent
 	messages             chat.MessagesComponent
 	completions          dialog.CompletionDialog
-	completionManager    *completions.CompletionManager
+	commandProvider      dialog.CompletionProvider
 	showCompletionDialog bool
 	leaderBinding        *key.Binding
 	isLeaderSequence     bool
@@ -105,6 +105,27 @@ var BUGGED_SCROLL_KEYS = map[string]bool{
 	"m": true,
 	"[": true,
 	";": true,
+	"<": true,
+}
+
+func isScrollRelatedInput(keyString string) bool {
+	if len(keyString) == 0 {
+		return false
+	}
+
+	for _, char := range keyString {
+		charStr := string(char)
+		if !BUGGED_SCROLL_KEYS[charStr] {
+			return false
+		}
+	}
+
+	if len(keyString) > 3 &&
+		(keyString[len(keyString)-1] == 'M' || keyString[len(keyString)-1] == 'm') {
+		return true
+	}
+
+	return len(keyString) > 1
 }
 
 func (a appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -114,7 +135,8 @@ func (a appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyPressMsg:
 		keyString := msg.String()
-		if time.Since(a.lastScroll) < time.Millisecond*100 && BUGGED_SCROLL_KEYS[keyString] {
+
+		if time.Since(a.lastScroll) < time.Millisecond*100 && (BUGGED_SCROLL_KEYS[keyString] || isScrollRelatedInput(keyString)) {
 			return a, nil
 		}
 
@@ -154,37 +176,16 @@ func (a appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		// 3. Handle completions trigger
-		if keyString == "/" && !a.showCompletionDialog {
+		if keyString == "/" &&
+			!a.showCompletionDialog &&
+			a.editor.Value() == "" {
 			a.showCompletionDialog = true
 
-			initialValue := "/"
-			currentInput := a.editor.Value()
-
-			// if the input doesn't end with a space,
-			// then we want to include the last word
-			// (ie, `packages/`)
-			if !strings.HasSuffix(currentInput, " ") {
-				words := strings.Split(a.editor.Value(), " ")
-				if len(words) > 0 {
-					lastWord := words[len(words)-1]
-					lastWord = strings.TrimSpace(lastWord)
-					initialValue = lastWord + "/"
-				}
-			}
-
-			updated, cmd := a.completions.Update(
-				app.CompletionDialogTriggeredMsg{
-					InitialValue: initialValue,
-				},
-			)
-			a.completions = updated.(dialog.CompletionDialog)
-			cmds = append(cmds, cmd)
-
-			updated, cmd = a.editor.Update(msg)
+			updated, cmd := a.editor.Update(msg)
 			a.editor = updated.(chat.EditorComponent)
 			cmds = append(cmds, cmd)
 
-			updated, cmd = a.updateCompletions(msg)
+			updated, cmd = a.completions.Update(msg)
 			a.completions = updated.(dialog.CompletionDialog)
 			cmds = append(cmds, cmd)
 
@@ -194,7 +195,7 @@ func (a appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.showCompletionDialog {
 			switch keyString {
 			case "tab", "enter", "esc", "ctrl+c":
-				updated, cmd := a.updateCompletions(msg)
+				updated, cmd := a.completions.Update(msg)
 				a.completions = updated.(dialog.CompletionDialog)
 				cmds = append(cmds, cmd)
 				return a, tea.Batch(cmds...)
@@ -204,7 +205,7 @@ func (a appModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.editor = updated.(chat.EditorComponent)
 			cmds = append(cmds, cmd)
 
-			updated, cmd = a.updateCompletions(msg)
+			updated, cmd = a.completions.Update(msg)
 			a.completions = updated.(dialog.CompletionDialog)
 			cmds = append(cmds, cmd)
 
@@ -807,6 +808,17 @@ func (a appModel) executeCommand(command commands.Command) (tea.Model, tea.Cmd) 
 		shareUrl := response.Share.URL
 		cmds = append(cmds, tea.SetClipboard(shareUrl))
 		cmds = append(cmds, toast.NewSuccessToast("Share URL copied to clipboard!"))
+	case commands.SessionUnshareCommand:
+		if a.app.Session.ID == "" {
+			return a, nil
+		}
+		_, err := a.app.Client.Session.Unshare(context.Background(), a.app.Session.ID)
+		if err != nil {
+			slog.Error("Failed to unshare session", "error", err)
+			return a, toast.NewErrorToast("Failed to unshare session")
+		}
+		a.app.Session.Share.URL = ""
+		cmds = append(cmds, toast.NewSuccessToast("Session unshared successfully"))
 	case commands.SessionInterruptCommand:
 		if a.app.Session.ID == "" {
 			return a, nil
@@ -948,22 +960,12 @@ func (a appModel) executeCommand(command commands.Command) (tea.Model, tea.Cmd) 
 	return a, tea.Batch(cmds...)
 }
 
-func (a appModel) updateCompletions(msg tea.Msg) (tea.Model, tea.Cmd) {
-	currentInput := a.editor.Value()
-	if currentInput != "" {
-		provider := a.completionManager.GetProvider(currentInput)
-		a.completions.SetProvider(provider)
-	}
-	return a.completions.Update(msg)
-}
-
 func NewModel(app *app.App) tea.Model {
-	completionManager := completions.NewCompletionManager(app)
-	initialProvider := completionManager.DefaultProvider()
+	commandProvider := completions.NewCommandCompletionProvider(app)
 
 	messages := chat.NewMessagesComponent(app)
 	editor := chat.NewEditorComponent(app)
-	completions := dialog.NewCompletionDialogComponent(initialProvider)
+	completions := dialog.NewCompletionDialogComponent(commandProvider)
 
 	var leaderBinding *key.Binding
 	if app.Config.Keybinds.Leader != "" {
@@ -977,7 +979,7 @@ func NewModel(app *app.App) tea.Model {
 		editor:               editor,
 		messages:             messages,
 		completions:          completions,
-		completionManager:    completionManager,
+		commandProvider:      commandProvider,
 		leaderBinding:        leaderBinding,
 		isLeaderSequence:     false,
 		showCompletionDialog: false,
